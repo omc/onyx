@@ -2,6 +2,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from opensearchpy.exceptions import AuthorizationException, RequestError
 from opensearchpy.helpers.errors import BulkIndexError
 
 from onyx.access.models import DocumentAccess
@@ -44,7 +45,10 @@ from onyx.document_index.opensearch.client import (
     is_cluster_block_error,
 )
 from onyx.document_index.opensearch.cluster_settings import OPENSEARCH_CLUSTER_SETTINGS
-from onyx.document_index.opensearch.constants import OpenSearchSearchType
+from onyx.document_index.opensearch.constants import (
+    OPENSEARCH_SEARCH_PIPELINE,
+    OpenSearchSearchType,
+)
 from onyx.document_index.opensearch.schema import (
     ACCESS_CONTROL_LIST_FIELD_NAME,
     CONTENT_FIELD_NAME,
@@ -62,8 +66,8 @@ from onyx.document_index.opensearch.schema import (
 )
 from onyx.document_index.opensearch.search import (
     DocumentQuery,
+    get_hybrid_search_pipeline_name,
     get_min_max_normalization_pipeline_name_and_config,
-    get_normalization_pipeline_name_and_config,
     get_zscore_normalization_pipeline_name_and_config,
 )
 from onyx.indexing.models import DocMetadataAwareIndexChunk, Document
@@ -107,14 +111,32 @@ def generate_opensearch_filtered_access_control_list(
 
 
 def set_cluster_state(client: OpenSearchClient) -> None:
-    if not client.put_cluster_settings(settings=OPENSEARCH_CLUSTER_SETTINGS):
-        logger.error(
-            "Failed to put cluster settings. If the settings have never been set before, "
-            "this may cause unexpected index creation when indexing documents into an "
-            "index that does not exist, or may cause expected logs to not appear. If this "
-            "is not the first time running Onyx against this instance of OpenSearch, these "
-            "settings have likely already been set. Not taking any further action..."
+    try:
+        if not client.put_cluster_settings(settings=OPENSEARCH_CLUSTER_SETTINGS):
+            logger.error(
+                "Failed to put cluster settings. If the settings have never been set before, "
+                "this may cause unexpected index creation when indexing documents into an "
+                "index that does not exist, or may cause expected logs to not appear. If this "
+                "is not the first time running Onyx against this instance of OpenSearch, these "
+                "settings have likely already been set. Not taking any further action..."
+            )
+    except (AuthorizationException, RequestError) as e:
+        # Hosted multi-tenant clusters (e.g. Bonsai) can reject cluster-level
+        # settings. They are best-effort, so continue without them.
+        logger.warning(
+            "OpenSearch rejected the cluster settings request. Continuing without "
+            "them; action.auto_create_index and the search slowlog thresholds stay "
+            "at the cluster defaults. Error: %s",
+            e,
         )
+    if OPENSEARCH_SEARCH_PIPELINE is not None:
+        # The cluster owns the pipeline; Onyx cannot create or read it.
+        logger.info(
+            "Using existing search pipeline %s for hybrid search; skipping "
+            "creation of the Onyx normalization pipelines.",
+            OPENSEARCH_SEARCH_PIPELINE,
+        )
+        return
     min_max_normalization_pipeline_name, min_max_normalization_pipeline_config = (
         get_min_max_normalization_pipeline_name_and_config()
     )
@@ -881,10 +903,9 @@ class OpenSearchDocumentIndex(DocumentIndex):
             index_filters=filters,
             include_hidden=False,
         )
-        normalization_pipeline_name, _ = get_normalization_pipeline_name_and_config()
         search_hits: list[SearchHit[DocumentChunkWithoutVectors]] = self._client.search(
             body=query_body,
-            search_pipeline_id=normalization_pipeline_name,
+            search_pipeline_id=get_hybrid_search_pipeline_name(),
             search_type=OpenSearchSearchType.HYBRID,
         )
 

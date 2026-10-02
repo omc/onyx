@@ -113,3 +113,42 @@ HYBRID_SEARCH_NORMALIZATION_PIPELINE: HybridSearchNormalizationPipeline = (
     if os.environ.get("HYBRID_SEARCH_NORMALIZATION_PIPELINE", None) is not None
     else HybridSearchNormalizationPipeline.MIN_MAX
 )
+
+
+# Name of an existing search pipeline to use for hybrid search instead of the
+# Onyx-managed normalization pipelines. Use this when the cluster forbids
+# creating search pipelines (e.g. hosted multi-tenant clusters). Onyx does not
+# create or check this pipeline; its weights must match the hybrid sub-query
+# order (see OPENSEARCH_HYBRID_SUBQUERY_ORDER). When set,
+# HYBRID_SEARCH_NORMALIZATION_PIPELINE is ignored.
+OPENSEARCH_SEARCH_PIPELINE: str | None = (
+    os.environ.get("OPENSEARCH_SEARCH_PIPELINE", "").strip() or None
+)
+
+
+class HybridSubqueryOrder(str, Enum):
+    # Vector sub-queries first, then the keyword sub-query. Current default.
+    KNN_FIRST = "knn_first"
+    # Keyword sub-query first, then the vector sub-queries.
+    LEXICAL_FIRST = "lexical_first"
+
+
+# Order of the sub-queries in a hybrid query. Normalization weights apply by
+# position, so this must match the order of the weights in the search pipeline.
+# Will raise and block application start if set but not a valid value.
+OPENSEARCH_HYBRID_SUBQUERY_ORDER: HybridSubqueryOrder = HybridSubqueryOrder(
+    os.environ.get("OPENSEARCH_HYBRID_SUBQUERY_ORDER", "").strip().lower()
+    or HybridSubqueryOrder.KNN_FIRST.value
+)
+
+if (
+    OPENSEARCH_SEARCH_PIPELINE is not None
+    and HYBRID_SEARCH_SUBQUERY_CONFIGURATION
+    is not HybridSearchSubqueryConfiguration.CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
+):
+    raise ValueError(
+        "OPENSEARCH_SEARCH_PIPELINE requires HYBRID_SEARCH_SUBQUERY_CONFIGURATION="
+        f"{HybridSearchSubqueryConfiguration.CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD.value} "
+        "(one vector and one keyword sub-query), since external pipelines define "
+        "two weights."
+    )

@@ -17,8 +17,11 @@ from onyx.document_index.opensearch.constants import (
     DEFAULT_OPENSEARCH_MAX_RESULT_WINDOW,
     HYBRID_SEARCH_NORMALIZATION_PIPELINE,
     HYBRID_SEARCH_SUBQUERY_CONFIGURATION,
+    OPENSEARCH_HYBRID_SUBQUERY_ORDER,
+    OPENSEARCH_SEARCH_PIPELINE,
     HybridSearchNormalizationPipeline,
     HybridSearchSubqueryConfiguration,
+    HybridSubqueryOrder,
 )
 from onyx.document_index.opensearch.schema import (
     ACCESS_CONTROL_LIST_FIELD_NAME,
@@ -54,6 +57,18 @@ TermQuery: TypeAlias = dict[str, dict[str, dict[str, _T]]]
 
 
 # TODO(andrei): Turn all magic dictionaries to pydantic models.
+
+
+def _apply_hybrid_subquery_order(items: list[_T]) -> list[_T]:
+    """Orders hybrid sub-queries, or their weights, per
+    OPENSEARCH_HYBRID_SUBQUERY_ORDER.
+
+    Callers build items in knn-first order. Both the sub-queries and the
+    normalization weights must go through this function so they stay aligned.
+    """
+    if OPENSEARCH_HYBRID_SUBQUERY_ORDER is HybridSubqueryOrder.LEXICAL_FIRST:
+        return list(reversed(items))
+    return items
 
 
 # Normalization pipelines combine document scores from multiple query clauses.
@@ -104,7 +119,7 @@ def _get_hybrid_search_normalization_weights() -> list[float]:
         "Bug: Hybrid search normalization weights do not sum to 1.0."
     )
 
-    return hybrid_search_normalization_weights
+    return _apply_hybrid_subquery_order(hybrid_search_normalization_weights)
 
 
 def get_min_max_normalization_pipeline_name_and_config() -> tuple[str, dict[str, Any]]:
@@ -165,6 +180,14 @@ def get_normalization_pipeline_name_and_config() -> tuple[str, dict[str, Any]]:
         raise ValueError(
             f"Bug: Unhandled hybrid search normalization pipeline: {HYBRID_SEARCH_NORMALIZATION_PIPELINE}."
         )
+
+
+def get_hybrid_search_pipeline_name() -> str:
+    """Returns the name of the search pipeline to use for hybrid search."""
+    if OPENSEARCH_SEARCH_PIPELINE is not None:
+        return OPENSEARCH_SEARCH_PIPELINE
+    pipeline_name, _ = get_normalization_pipeline_name_and_config()
+    return pipeline_name
 
 
 class DocumentQuery:
@@ -737,29 +760,33 @@ class DocumentQuery:
             HYBRID_SEARCH_SUBQUERY_CONFIGURATION
             is HybridSearchSubqueryConfiguration.TITLE_VECTOR_CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
         ):
-            return [
-                DocumentQuery._get_title_vector_similarity_search_query(
-                    query_vector, vector_candidates
-                ),
-                DocumentQuery._get_content_vector_similarity_search_query(
-                    query_vector, vector_candidates
-                ),
-                DocumentQuery._get_title_content_combined_keyword_search_query(
-                    query_text
-                ),
-            ]
+            return _apply_hybrid_subquery_order(
+                [
+                    DocumentQuery._get_title_vector_similarity_search_query(
+                        query_vector, vector_candidates
+                    ),
+                    DocumentQuery._get_content_vector_similarity_search_query(
+                        query_vector, vector_candidates
+                    ),
+                    DocumentQuery._get_title_content_combined_keyword_search_query(
+                        query_text
+                    ),
+                ]
+            )
         elif (
             HYBRID_SEARCH_SUBQUERY_CONFIGURATION
             is HybridSearchSubqueryConfiguration.CONTENT_VECTOR_TITLE_CONTENT_COMBINED_KEYWORD
         ):
-            return [
-                DocumentQuery._get_content_vector_similarity_search_query(
-                    query_vector, vector_candidates
-                ),
-                DocumentQuery._get_title_content_combined_keyword_search_query(
-                    query_text
-                ),
-            ]
+            return _apply_hybrid_subquery_order(
+                [
+                    DocumentQuery._get_content_vector_similarity_search_query(
+                        query_vector, vector_candidates
+                    ),
+                    DocumentQuery._get_title_content_combined_keyword_search_query(
+                        query_text
+                    ),
+                ]
+            )
         else:
             raise ValueError(
                 f"Bug: Unhandled hybrid search subquery configuration: {HYBRID_SEARCH_SUBQUERY_CONFIGURATION}"
